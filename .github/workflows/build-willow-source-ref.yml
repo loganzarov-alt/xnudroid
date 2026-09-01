@@ -35,6 +35,24 @@ jobs:
             https://github.com/MiCode/Xiaomi_Kernel_OpenSource.git kernel
           git -C kernel rev-parse HEAD | tee xiaomi-kernel-commit.txt
 
+      - name: Apply host-only compatibility fixes
+        shell: bash
+        run: |
+          set -euxo pipefail
+          # The 4.14 SELinux header generator is built against the CI host's
+          # newer socket headers. Its PF_MAX guard is a development-time check,
+          # not runtime phone logic; disable only that host-side guard.
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('kernel/security/selinux/include/classmap.h')
+          s = p.read_text()
+          old = '#if PF_MAX > 44\n#error New address family defined, please update secclass_map.\n#endif'
+          new = '#if 0 /* CI host headers are newer than this Android 4.14 tree */\n#error New address family defined, please update secclass_map.\n#endif'
+          if old not in s:
+              raise SystemExit('expected PF_MAX compatibility guard not found')
+          p.write_text(s.replace(old, new, 1))
+          PY
+
       - name: Configure official trinket kernel
         shell: bash
         run: |
