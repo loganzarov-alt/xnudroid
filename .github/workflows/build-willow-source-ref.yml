@@ -18,8 +18,12 @@ jobs:
           apt-get update
           DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
             ca-certificates git make gcc g++ gcc-aarch64-linux-gnu \
+            libc6-dev-arm64-cross \
             bc bison flex libssl-dev libelf-dev cpio gzip xz-utils file \
             python3 python3-distutils
+          ln -sf /usr/bin/python3 /usr/local/bin/python
+          python --version
+          aarch64-linux-gnu-gcc --version | head -n1
 
       - name: Checkout xnudroid
         uses: actions/checkout@v4
