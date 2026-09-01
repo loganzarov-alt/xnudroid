@@ -3,8 +3,7 @@ name: Build Willow source reference
 on:
   push:
     branches: [willow-source-ref]
-    paths-ignore:
-      - 'releases/**'
+    paths-ignore: ['releases/**']
   workflow_dispatch:
 
 permissions:
@@ -15,208 +14,157 @@ jobs:
     runs-on: ubuntu-latest
     container: ubuntu:20.04
     timeout-minutes: 120
-
     steps:
       - name: Install build dependencies
         shell: bash
         run: |
           apt-get update
           DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            ca-certificates git make gcc g++ gcc-aarch64-linux-gnu \
-            libc6-dev-arm64-cross \
-            bc bison flex libssl-dev libelf-dev cpio gzip xz-utils file \
+            ca-certificates git make gcc g++ gcc-aarch64-linux-gnu libc6-dev-arm64-cross \
+            clang lld bc bison flex libssl-dev libelf-dev cpio gzip xz-utils file \
             python3 python3-distutils zlib1g-dev
           ln -sf /usr/bin/python3 /usr/local/bin/python
-          python --version
+          clang --version | head -n1
           aarch64-linux-gnu-gcc --version | head -n1
 
       - name: Checkout xnudroid
         uses: actions/checkout@v4
 
-      - name: Fetch official Xiaomi Redmi Note 8T kernel source
+      - name: Fetch reference sources
         shell: bash
         run: |
-          git clone --depth=1 --branch willow-p-oss \
-            https://github.com/MiCode/Xiaomi_Kernel_OpenSource.git kernel
+          git clone --depth=1 --branch willow-p-oss https://github.com/MiCode/Xiaomi_Kernel_OpenSource.git kernel
+          git clone --depth=1 --branch android-12.1 https://github.com/TeamWin/android_device_xiaomi_ginkgo.git twrp-device
           git -C kernel rev-parse HEAD | tee xiaomi-kernel-commit.txt
-
-      - name: Fetch TeamWin ginkgo-willow device reference
-        shell: bash
-        run: |
-          git clone --depth=1 --branch android-12.1 \
-            https://github.com/TeamWin/android_device_xiaomi_ginkgo.git twrp-device
           git -C twrp-device rev-parse HEAD | tee twrp-device-commit.txt
           test -s twrp-device/prebuilt/Image.gz
           test -s twrp-device/prebuilt/dtbo.img
 
-      - name: Extract known-booting DTB tail from TWRP kernel
+      - name: Extract known-booting TWRP DTB
         shell: bash
         run: |
-          set -euxo pipefail
           python3 - <<'PY'
           from pathlib import Path
           import zlib, struct
-
           src = Path('twrp-device/prebuilt/Image.gz').read_bytes()
           d = zlib.decompressobj(16 + zlib.MAX_WBITS)
           d.decompress(src)
           tail = d.unused_data
-          magic = b'\xd0\x0d\xfe\xed'
-          pos = tail.find(magic)
-          if pos < 0:
-              raise SystemExit('TWRP Image.gz has no appended FDT magic after gzip stream')
+          pos = tail.find(b'\xd0\x0d\xfe\xed')
+          if pos < 0: raise SystemExit('no appended FDT in TWRP kernel')
           tail = tail[pos:]
-
-          if len(tail) < 8:
-              raise SystemExit('DTB tail is too short')
           total = struct.unpack('>I', tail[4:8])[0]
-          if total < 40 or total > len(tail):
-              raise SystemExit(f'invalid first FDT total size: {total} / tail {len(tail)}')
-
+          if total < 40 or total > len(tail): raise SystemExit('invalid FDT')
           Path('twrp-dtb-tail.bin').write_bytes(tail)
-          print(f'TWRP prebuilt bytes: {len(src)}')
-          print(f'Appended DTB tail bytes: {len(tail)}')
-          print(f'First FDT total size: {total}')
+          print('TWRP DTB bytes:', len(tail), 'first FDT:', total)
           PY
-          file twrp-device/prebuilt/Image.gz twrp-device/prebuilt/dtbo.img twrp-dtb-tail.bin
+          file twrp-dtb-tail.bin twrp-device/prebuilt/dtbo.img
 
-      - name: Apply host-only compatibility fixes
+      - name: Apply host-only compatibility fix
         shell: bash
         run: |
-          set -euxo pipefail
           python3 - <<'PY'
           from pathlib import Path
-          p = Path('kernel/security/selinux/include/classmap.h')
-          s = p.read_text()
-          old = '#if PF_MAX > 44\n#error New address family defined, please update secclass_map.\n#endif'
-          new = '#if 0 /* CI host headers are newer than this Android 4.14 tree */\n#error New address family defined, please update secclass_map.\n#endif'
-          if old not in s:
-              raise SystemExit('expected PF_MAX compatibility guard not found')
-          p.write_text(s.replace(old, new, 1))
+          p=Path('kernel/security/selinux/include/classmap.h')
+          s=p.read_text()
+          old='#if PF_MAX > 44\n#error New address family defined, please update secclass_map.\n#endif'
+          new='#if 0 /* newer CI host headers */\n#error New address family defined, please update secclass_map.\n#endif'
+          if old not in s: raise SystemExit('PF_MAX guard not found')
+          p.write_text(s.replace(old,new,1))
           PY
 
       - name: Configure official trinket kernel
         shell: bash
         run: |
-          set -euxo pipefail
-          export ARCH=arm64
-          export CROSS_COMPILE=aarch64-linux-gnu-
+          export ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu-
           mkdir -p out
           make -C kernel O="$GITHUB_WORKSPACE/out" vendor/trinket-perf_defconfig
-
-          kernel/scripts/config --file out/.config \
-            -d TOUCHSCREEN_FTS_BBB \
-            -d TOUCHSCREEN_NT36xxx_HOSTDL_SPI_BBB \
-            -d TOUCHSCREEN_AAAAAA_BBB
+          kernel/scripts/config --file out/.config -d TOUCHSCREEN_FTS_BBB -d TOUCHSCREEN_AAAAAA_BBB
           make -C kernel O="$GITHUB_WORKSPACE/out" olddefconfig
-
           grep -E 'CONFIG_ARCH_TRINKET=|CONFIG_DRM=|CONFIG_BUILD_ARM64_APPENDED_DTB_IMAGE=' out/.config
-          grep -E 'TOUCHSCREEN_(FTS_BBB|NT36xxx_HOSTDL_SPI_BBB|AAAAAA_BBB)' out/.config || true
 
-      - name: Build Xiaomi Image.gz
+      - name: Clang smoke-test Qualcomm IPA/GSI
+        shell: bash
+        run: |
+          set -euo pipefail
+          export ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu-
+          CLANG_CC='clang --target=aarch64-linux-gnu'
+          make -C kernel O="$GITHUB_WORKSPACE/out" -j"$(nproc)" CC="$CLANG_CC" \
+            drivers/platform/msm/gsi/gsi_dbg.o \
+            drivers/platform/msm/ipa/ipa_v3/ipa.o \
+            drivers/platform/msm/ipa/ipa_clients/odu_bridge.o
+
+      - name: Build Xiaomi Image.gz with Clang
         shell: bash
         run: |
           set -uo pipefail
-          export ARCH=arm64
-          export CROSS_COMPILE=aarch64-linux-gnu-
-
+          export ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu-
+          CLANG_CC='clang --target=aarch64-linux-gnu'
           set +e
-          make -C kernel O="$GITHUB_WORKSPACE/out" -j"$(nproc)" \
-            CC=aarch64-linux-gnu-gcc Image.gz > kernel-build.log 2>&1
+          make -C kernel O="$GITHUB_WORKSPACE/out" -j"$(nproc)" CC="$CLANG_CC" Image.gz > kernel-build.log 2>&1
           rc=$?
           set -e
-
           if [ "$rc" -ne 0 ]; then
-            echo '=== XIAOMI KERNEL FATAL/ERROR LINES ==='
+            echo '=== FATAL/ERROR ==='
             grep -nE 'fatal error:|(^|[[:space:]])error:|undefined reference|No such file or directory|ERROR:|Error [0-9]+' kernel-build.log | tail -n 120 || true
-            echo '=== XIAOMI KERNEL LOG TAIL ==='
+            echo '=== TAIL ==='
             tail -n 180 kernel-build.log
             exit "$rc"
           fi
-
-          tail -n 80 kernel-build.log
+          tail -n 60 kernel-build.log
           test -s out/arch/arm64/boot/Image.gz
           file out/arch/arm64/boot/Image.gz
           cp out/.config willow-kernel.config
 
-      - name: Attach TWRP ginkgo-willow DTBs to source-built kernel
+      - name: Attach TWRP DTB
         shell: bash
         run: |
-          set -euxo pipefail
           cat out/arch/arm64/boot/Image.gz twrp-dtb-tail.bin > zaros-Image.gz-dtb
           test -s zaros-Image.gz-dtb
-          file zaros-Image.gz-dtb
           sha256sum zaros-Image.gz-dtb | tee zaros-Image.gz-dtb.sha256
 
-      - name: Build tiny ZAROS initramfs
+      - name: Build ZAROS initramfs
         shell: bash
         run: |
-          set -euxo pipefail
           mkdir -p ramdisk
           aarch64-linux-gnu-gcc -O2 -static -s tools/zaros_init.c -o ramdisk/init
+          (cd ramdisk && find . -print0 | cpio --null -ov --format=newc | gzip -9) > zaros-ramdisk.cpio.gz
           file ramdisk/init
-          (
-            cd ramdisk
-            find . -print0 | cpio --null -ov --format=newc | gzip -9
-          ) > zaros-ramdisk.cpio.gz
 
-      - name: Pack Android recovery boot image v2
+      - name: Pack Android boot image v2
         shell: bash
         run: |
-          set -euxo pipefail
-          git clone --depth=1 --branch android-11.0.0_r48 \
-            https://android.googlesource.com/platform/system/tools/mkbootimg mkbootimg
-
+          git clone --depth=1 --branch android-11.0.0_r48 https://android.googlesource.com/platform/system/tools/mkbootimg mkbootimg
           CMDLINE='console=ttyMSM0,115200n8 androidboot.hardware=qcom androidboot.console=ttyMSM0 androidboot.memcg=1 lpm_levels.sleep_disabled=1 video=vfb:640x400,bpp=32,memsize=3072000 msm_rtb.filter=0x237 service_locator.enable=1 swiotlb=1 earlycon=msm_geni_serial,0x4a90000 cgroup.memory=nokmem,nosocket androidboot.selinux=permissive androidboot.usbconfigfs=true'
-
           python3 mkbootimg/mkbootimg.py \
-            --header_version 2 \
-            --kernel zaros-Image.gz-dtb \
-            --ramdisk zaros-ramdisk.cpio.gz \
-            --recovery_dtbo twrp-device/prebuilt/dtbo.img \
-            --dtb twrp-dtb-tail.bin \
-            --base 0x00000000 \
-            --pagesize 4096 \
-            --ramdisk_offset 0x01000000 \
-            --tags_offset 0x00000100 \
-            --cmdline "$CMDLINE" \
-            --output zaros-willow-v0.4-source-ref.img
-
+            --header_version 2 --kernel zaros-Image.gz-dtb --ramdisk zaros-ramdisk.cpio.gz \
+            --recovery_dtbo twrp-device/prebuilt/dtbo.img --dtb twrp-dtb-tail.bin \
+            --base 0x0 --pagesize 4096 --ramdisk_offset 0x01000000 --tags_offset 0x100 \
+            --cmdline "$CMDLINE" --output zaros-willow-v0.4-source-ref.img
           test -s zaros-willow-v0.4-source-ref.img
           file zaros-willow-v0.4-source-ref.img
-          ls -lh zaros-willow-v0.4-source-ref.img
           sha256sum zaros-willow-v0.4-source-ref.img | tee zaros-willow-v0.4-source-ref.sha256
 
       - name: Publish build into branch
         shell: bash
         run: |
-          set -euxo pipefail
           mkdir -p releases/v0.4
-          cp zaros-willow-v0.4-source-ref.img releases/v0.4/
-          cp zaros-willow-v0.4-source-ref.sha256 releases/v0.4/
-          cp zaros-Image.gz-dtb.sha256 releases/v0.4/
-          cp xiaomi-kernel-commit.txt releases/v0.4/
-          cp twrp-device-commit.txt releases/v0.4/
+          cp zaros-willow-v0.4-source-ref.img zaros-willow-v0.4-source-ref.sha256 zaros-Image.gz-dtb.sha256 xiaomi-kernel-commit.txt twrp-device-commit.txt releases/v0.4/
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add releases/v0.4
-          if git diff --cached --quiet; then
-            echo 'release files already current'
-          else
+          if ! git diff --cached --quiet; then
             git commit -m 'Publish willow v0.4 source-reference build [skip ci]'
             git push origin HEAD:willow-source-ref
           fi
 
-      - name: Upload source-reference artifacts
+      - name: Upload artifacts
         continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: zaros-willow-v0.4-source-ref
-          if-no-files-found: error
           path: |
             zaros-willow-v0.4-source-ref.img
             zaros-willow-v0.4-source-ref.sha256
             zaros-Image.gz-dtb.sha256
             willow-kernel.config
-            xiaomi-kernel-commit.txt
-            twrp-device-commit.txt
