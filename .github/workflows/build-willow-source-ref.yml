@@ -67,7 +67,6 @@ jobs:
               raise SystemExit('TWRP Image.gz has no appended FDT magic after gzip stream')
           tail = tail[pos:]
 
-          # Validate at least the first flattened device tree header.
           if len(tail) < 8:
               raise SystemExit('DTB tail is too short')
           total = struct.unpack('>I', tail[4:8])[0]
@@ -105,8 +104,6 @@ jobs:
           mkdir -p out
           make -C kernel O="$GITHUB_WORKSPACE/out" vendor/trinket-perf_defconfig
 
-          # Xiaomi's published tree omits proprietary firmware included by two
-          # touchscreen drivers. Touch is not required for the Stage-0 display test.
           kernel/scripts/config --file out/.config \
             -d TOUCHSCREEN_FTS_BBB \
             -d TOUCHSCREEN_NT36xxx_HOSTDL_SPI_BBB \
@@ -119,11 +116,25 @@ jobs:
       - name: Build Xiaomi Image.gz
         shell: bash
         run: |
-          set -euxo pipefail
+          set -uo pipefail
           export ARCH=arm64
           export CROSS_COMPILE=aarch64-linux-gnu-
+
+          set +e
           make -C kernel O="$GITHUB_WORKSPACE/out" -j"$(nproc)" \
-            CC=aarch64-linux-gnu-gcc Image.gz
+            CC=aarch64-linux-gnu-gcc Image.gz > kernel-build.log 2>&1
+          rc=$?
+          set -e
+
+          if [ "$rc" -ne 0 ]; then
+            echo '=== XIAOMI KERNEL FATAL/ERROR LINES ==='
+            grep -nE 'fatal error:|(^|[[:space:]])error:|undefined reference|No such file or directory|ERROR:|Error [0-9]+' kernel-build.log | tail -n 120 || true
+            echo '=== XIAOMI KERNEL LOG TAIL ==='
+            tail -n 180 kernel-build.log
+            exit "$rc"
+          fi
+
+          tail -n 80 kernel-build.log
           test -s out/arch/arm64/boot/Image.gz
           file out/arch/arm64/boot/Image.gz
           cp out/.config willow-kernel.config
