@@ -69,7 +69,11 @@ jobs:
           set -euxo pipefail
           export ARCH=arm64
           export CROSS_COMPILE=aarch64-linux-gnu-
-          make -C kernel O="$GITHUB_WORKSPACE/out" -j"$(nproc)" Image.gz-dtb
+          # Xiaomi's tree wraps GCC in a Python-2-only warning parser.
+          # Override CC only for CI so the original 4.14 sources can be built
+          # with Ubuntu 20.04's aarch64 GCC without altering phone runtime code.
+          make -C kernel O="$GITHUB_WORKSPACE/out" -j"$(nproc)" \
+            CC=aarch64-linux-gnu-gcc Image.gz-dtb
           test -s out/arch/arm64/boot/Image.gz-dtb
           file out/arch/arm64/boot/Image.gz-dtb
           cp out/.config willow-kernel.config
